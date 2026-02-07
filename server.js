@@ -479,6 +479,106 @@ app.post("/chat", async (req, res) => {
 });
 
 /* ================================
+   STATIC JS for Odoo (script src)
+================================= */
+app.get("/lr-business.js", (req, res) => {
+  res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+  res.send(`(function(){
+  function getSlug(){ return new URLSearchParams(window.location.search).get("slug"); }
+  var slug = getSlug();
+  var API = "https://ai-engine-zcer.onrender.com"; // <= ton URL Render
+
+  function byId(id){ return document.getElementById(id); }
+  var elName = byId("biz-name");
+  var elDesc = byId("biz-desc");
+  var elAddr = byId("biz-address");
+  var elMap = byId("biz-map");
+  var elMapEmbed = byId("biz-map-embed");
+  var elDebug = byId("lr-debug");
+
+  function dbg(t){ if(elDebug) elDebug.textContent = "DEBUG: " + t; }
+
+  if(!slug){
+    if(elName) elName.textContent = "Business introuvable";
+    if(elDesc) elDesc.textContent = "Lien incomplet. Exemple : /business?slug=atelier-roma";
+    dbg("slug manquant");
+    return;
+  }
+
+  dbg("slug = " + slug + " (chargement...)");
+
+  fetch(API + "/business/" + encodeURIComponent(slug))
+    .then(function(r){ return r.json().then(function(data){ 
+      if(!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+      return data;
+    });})
+    .then(function(b){
+      if(elName) elName.textContent = b.name || slug;
+      if(elDesc) elDesc.textContent = b.description || "";
+      if(elAddr) elAddr.textContent = b.address || "—";
+
+      var mapUrl = b.address
+        ? ("https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(b.address))
+        : (b.map_url || "#");
+
+      if(elMap) elMap.href = mapUrl;
+
+      if(elMapEmbed && b.address){
+        elMapEmbed.src = "https://www.google.com/maps?q=" + encodeURIComponent(b.address) + "&output=embed";
+      }
+
+      dbg("OK ✅ données chargées");
+    })
+    .catch(function(e){
+      if(elName) elName.textContent = "Business introuvable";
+      if(elDesc) elDesc.textContent = "Impossible de charger les données.";
+      dbg("Erreur fetch: " + e.message);
+      console.error(e);
+    });
+
+  // Chat (optionnel si tu as déjà ton widget ailleurs)
+  var sessionId = "sess_" + Math.random().toString(16).slice(2);
+  var box = byId("lr-messages");
+  var input = byId("lr-input");
+  var btn = byId("lr-send");
+
+  function addMessage(role, text){
+    if(!box) return;
+    var div = document.createElement("div");
+    div.style.margin = "6px 0";
+    div.innerHTML = "<b>" + role + " :</b> " + text;
+    box.appendChild(div);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  async function sendMessage(){
+    if(!input) return;
+    var message = (input.value || "").trim();
+    if(!message) return;
+
+    addMessage("Vous", message);
+    input.value = "";
+
+    try{
+      var r = await fetch(API + "/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ business_slug: slug, session_id: sessionId, message: message })
+      });
+      var data = await r.json();
+      if(!r.ok) throw new Error(data.error || "Erreur API");
+      addMessage("Assistant", (data.reply && data.reply.text) ? data.reply.text : "…");
+    }catch(e){
+      addMessage("Assistant", "Désolé, problème technique. (" + e.message + ")");
+    }
+  }
+
+  if(btn) btn.addEventListener("click", sendMessage);
+  if(input) input.addEventListener("keydown", function(e){ if(e.key === "Enter") sendMessage(); });
+})();`);
+});
+
+/* ================================
    START
 ================================= */
 const PORT = process.env.PORT || 8787;
