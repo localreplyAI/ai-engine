@@ -9,7 +9,7 @@ app.use(cors());
 app.use(express.json());
 
 /* ================================
-   SESSION MEMORY (V1 - in-memory)
+   SESSION MEMORY (in-memory V1)
 ================================= */
 const SESSIONS = {};
 
@@ -63,6 +63,54 @@ function listServicesText(kb) {
   return kb.services
     .map(s => `${s.name} (${s.price_chf} CHF)`)
     .join(" | ");
+}
+
+/* ================================
+   DATE NORMALIZATION
+================================= */
+function normalizeDate(dateStr) {
+  if (!dateStr) return null;
+
+  // déjà normalisée
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    return dateStr;
+  }
+
+  const months = {
+    "janvier": 1,
+    "février": 2,
+    "fevrier": 2,
+    "mars": 3,
+    "avril": 4,
+    "mai": 5,
+    "juin": 6,
+    "juillet": 7,
+    "août": 8,
+    "aout": 8,
+    "septembre": 9,
+    "octobre": 10,
+    "novembre": 11,
+    "décembre": 12,
+    "decembre": 12
+  };
+
+  const m = dateStr.toLowerCase().trim();
+  const match = m.match(/^(\d{1,2})\s+([a-zéû]+)/);
+  if (!match) return null;
+
+  const day = parseInt(match[1], 10);
+  const month = months[match[2]];
+  if (!month) return null;
+
+  const now = new Date();
+  let year = now.getFullYear();
+
+  const candidate = new Date(year, month - 1, day);
+  if (candidate < now) {
+    year += 1;
+  }
+
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
 /* ================================
@@ -129,7 +177,7 @@ app.post("/chat", async (req, res) => {
 
     const sid = session_id || "anon";
 
-    // Init session state
+    // Init session
     SESSIONS[sid] = SESSIONS[sid] || {
       service_name: null,
       date: null,
@@ -149,9 +197,12 @@ app.post("/chat", async (req, res) => {
     const analysis = await analyzeMessage({ message, kb: effectiveKB });
     console.log("ANALYSIS:", analysis);
 
-    // Merge analysis into state (jamais écraser par null)
+    // Merge dans l’état (jamais écraser par null)
     if (analysis.service_name) state.service_name = analysis.service_name;
-    if (analysis.date) state.date = analysis.date;
+    if (analysis.date) {
+      const normalized = normalizeDate(analysis.date);
+      if (normalized) state.date = normalized;
+    }
     if (analysis.time) state.time = analysis.time;
 
     /* ===== BOOKING STATE MACHINE (HAIR SALON V1) ===== */
@@ -189,7 +240,7 @@ app.post("/chat", async (req, res) => {
         });
       }
 
-      // Tout est prêt → confirmation
+      // Confirmation
       return res.json({
         session_id: sid,
         reply: {
