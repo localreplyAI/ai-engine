@@ -1,5 +1,22 @@
+/**
+ * LocalReply AI Engine — server.js (Step B)
+ * - POST /chat                    -> chat + booking flow (your existing logic)
+ * - GET  /business/:slug          -> public business data for Odoo /business?slug=...
+ * - POST /business/upsert (ADMIN) -> create/update a business (for your "simulate business" page)
+ *
+ * Requires:
+ *   npm i express cors openai pg
+ *
+ * Render ENV vars:
+ *   OPENAI_API_KEY=...
+ *   DATABASE_URL=... (Neon/Supabase Postgres)
+ *   ADMIN_TOKEN=...  (long random)
+ *   RESEND_API_KEY=... (optional, only if you want email sending)
+ */
+
 const express = require("express");
 const cors = require("cors");
+const { Pool } = require("pg");
 
 let OpenAI = require("openai");
 OpenAI = OpenAI.default || OpenAI;
@@ -9,33 +26,58 @@ app.use(cors());
 app.use(express.json());
 
 /* ================================
-   SESSION MEMORY
+   DB (Postgres)
 ================================= */
-const SESSIONS = {};
+if (!process.env.DATABASE_URL) {
+  console.warn("⚠️ Missing DATABASE_URL. The /business endpoints will fail until set.");
+}
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  // If your provider requires SSL, uncomment:
+  // ssl: { rejectUnauthorized: false },
+});
+
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS businesses (
+      slug TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      address TEXT DEFAULT '',
+      map_url TEXT DEFAULT '',
+      business_type TEXT DEFAULT 'local_business',
+      contact_email TEXT DEFAULT '',
+      timezone TEXT DEFAULT 'Europe/Zurich',
+      services JSONB DEFAULT '[]'::jsonb,
+      hours JSONB DEFAULT '{}'::jsonb,
+      rules JSONB DEFAULT '{}'::jsonb,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+}
+initDb().then(() => console.log("✅ DB ready")).catch((e) => {
+  console.error("❌ DB init error:", e);
+});
 
 /* ================================
-   FALLBACK BUSINESS
-   (si pas de KB / ou pas d’email fourni)
+   ADMIN AUTH (simple)
 ================================= */
-const FALLBACK_BUSINESSES = {
-  "atelier-roma": {
-    name: "Atelier Roma",
-    business_type: "hair_salon",
-    contact_email: "ton-email-business@exemple.com", // <-- CHANGE ICI (email du business)
-    kb: {
-      business: {
-        name: "Atelier Roma",
-        business_type: "hair_salon",
-        timezone: "Europe/Zurich",
-      },
-      services: [
-        { name: "Coupe homme", price_chf: 35 },
-        { name: "Barbe", price_chf: 25 },
-        { name: "Coupe + barbe", price_chf: 55 },
-      ],
-    },
-  },
-};
+function requireAdmin(req, res, next) {
+  const token = req.headers["x-admin-token"];
+  if (!process.env.ADMIN_TOKEN) {
+    return res.status(500).json({ error: "Missing ADMIN_TOKEN on server" });
+  }
+  if (token !== process.env.ADMIN_TOKEN) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
+}
+
+/* ================================
+   SESSION MEMORY (in-memory)
+   (ok for now; later you can move to DB/Redis)
+================================= */
+const SESSIONS = {};
 
 /* ================================
    OPENAI (intent only)
@@ -68,6 +110,7 @@ JSON:
 
 /* ================================
    EMAIL via RESEND (no SMTP)
+   (optional - can be disabled by not setting RESEND_API_KEY)
 ================================= */
 async function sendBookingEmail({ to, businessName, booking }) {
   const apiKey = process.env.RESEND_API_KEY;
@@ -88,6 +131,7 @@ Envoyé via LocalReply AI.
     `.trim(),
   };
 
+  // Node 18+ has fetch. If not, install node-fetch.
   const r = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
@@ -131,6 +175,7 @@ function isConfirmation(text) {
 function parseDateFromText(text) {
   if (!text) return null;
 
+  // already YYYY-MM-DD
   const iso = text.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
   if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
 
@@ -173,14 +218,119 @@ function parseDateFromText(text) {
 function parseTimeFromText(text) {
   if (!text) return null;
 
+  // "14h", "14h30"
   const h = text.match(/\b(\d{1,2})h(\d{2})?\b/i);
   if (h) return `${String(h[1]).padStart(2, "0")}:${h[2] || "00"}`;
 
+  // "14:30"
   const c = text.match(/\b(\d{1,2}):(\d{2})\b/);
   if (c) return `${String(c[1]).padStart(2, "0")}:${c[2]}`;
 
   return null;
 }
+
+/* ================================
+   BUSINESS ENDPOINTS
+================================= */
+
+/**
+ * Create or update a business (admin-only)
+ * Used by your Odoo "/create-business" test form.
+ */
+app.post("/business/upsert", requireAdmin, async (req, res) => {
+  try {
+    const {
+      slug,
+      name,
+      description = "",
+      address = "",
+      map_url = "",
+      business_type = "local_business",
+      contact_email = "",
+      timezone = "Europe/Zurich",
+      services = [],
+      hours = {},
+      rules = {},
+    } = req.body || {};
+
+    if (!slug || !name) {
+      return res.status(400).json({ error: "slug + name requis" });
+    }
+
+    await pool.query(
+      `
+      INSERT INTO businesses
+        (slug, name, description, address, map_url, business_type, contact_email, timezone, services, hours, rules, updated_at)
+      VALUES
+        ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb,NOW())
+      ON CONFLICT (slug) DO UPDATE SET
+        name = EXCLUDED.name,
+        description = EXCLUDED.description,
+        address = EXCLUDED.address,
+        map_url = EXCLUDED.map_url,
+        business_type = EXCLUDED.business_type,
+        contact_email = EXCLUDED.contact_email,
+        timezone = EXCLUDED.timezone,
+        services = EXCLUDED.services,
+        hours = EXCLUDED.hours,
+        rules = EXCLUDED.rules,
+        updated_at = NOW()
+      `,
+      [
+        slug,
+        name,
+        description,
+        address,
+        map_url,
+        business_type,
+        contact_email,
+        timezone,
+        JSON.stringify(services),
+        JSON.stringify(hours),
+        JSON.stringify(rules),
+      ]
+    );
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: "Erreur serveur", details: String(e) });
+  }
+});
+
+/**
+ * Public business data for the public page (/business?slug=...)
+ * Returns only non-sensitive fields.
+ */
+app.get("/business/:slug", async (req, res) => {
+  try {
+    const slug = req.params.slug;
+
+    const r = await pool.query(
+      `SELECT slug, name, description, address, map_url, business_type
+       FROM businesses
+       WHERE slug = $1`,
+      [slug]
+    );
+
+    if (r.rowCount === 0) {
+      return res.status(404).json({ error: "Business not found" });
+    }
+
+    const row = r.rows[0];
+    return res.json({
+      slug: row.slug,
+      name: row.name,
+      description: row.description || "",
+      address: row.address || "",
+      map_url: row.map_url || (row.address ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(row.address)}` : ""),
+      business_type: row.business_type || "local_business",
+    });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: "Erreur serveur", details: String(e) });
+  }
+});
 
 /* ================================
    CHAT ENDPOINT
@@ -202,20 +352,38 @@ app.post("/chat", async (req, res) => {
     };
     const state = SESSIONS[sid];
 
-    // Business & KB
-    const fallback = FALLBACK_BUSINESSES[business_slug];
-    const effectiveKB = kb || (fallback ? fallback.kb : null);
+    // Load business from DB
+    const r = await pool.query(
+      `SELECT name, business_type, contact_email, timezone, services
+       FROM businesses
+       WHERE slug = $1`,
+      [business_slug]
+    );
 
-    const businessName =
-      effectiveKB?.business?.name ||
-      fallback?.name ||
-      "ce business";
+    const dbBusiness = r.rowCount ? r.rows[0] : null;
 
-    const services = effectiveKB?.services || fallback?.kb?.services || [];
+    // Effective KB: if caller provides kb, it overrides; else build from DB
+    const effectiveKB =
+      kb ||
+      (dbBusiness
+        ? {
+            business: {
+              name: dbBusiness.name,
+              business_type: dbBusiness.business_type || "local_business",
+              timezone: dbBusiness.timezone || "Europe/Zurich",
+              // you can add more later (hours/rules/etc.)
+            },
+            services: Array.isArray(dbBusiness.services) ? dbBusiness.services : [],
+          }
+        : null);
+
+    const businessName = effectiveKB?.business?.name || "ce business";
+    const services = effectiveKB?.services || [];
+
+    // Email: from DB first, or from kb if you later include it
     const businessEmail =
       effectiveKB?.business?.contact_email ||
-      fallback?.contact_email ||
-      null;
+      (dbBusiness && dbBusiness.contact_email ? dbBusiness.contact_email : null);
 
     // Intent
     const intentRes = await analyzeIntent(message);
@@ -223,7 +391,7 @@ app.post("/chat", async (req, res) => {
       state.in_booking = true;
     }
 
-    // Si pas en booking, réponse simple
+    // If not in booking, simple reply for now
     if (!state.in_booking) {
       return res.json({
         session_id: sid,
@@ -231,7 +399,7 @@ app.post("/chat", async (req, res) => {
       });
     }
 
-    // Remplir les champs (code > IA)
+    // Fill fields (code > IA)
     if (!state.service) {
       const svc = services.find((s) => safeLower(message).includes(safeLower(s.name)));
       if (svc) state.service = svc.name;
@@ -245,9 +413,8 @@ app.post("/chat", async (req, res) => {
       if (t) state.time = t;
     }
 
-    // Si tout est rempli, proposer confirmation
+    // If all set -> confirm
     if (state.service && state.date && state.time) {
-      // Si l'utilisateur confirme -> envoi email + reset
       if (isConfirmation(message)) {
         if (!businessEmail) {
           delete SESSIONS[sid];
@@ -275,30 +442,22 @@ app.post("/chat", async (req, res) => {
 
         return res.json({
           session_id: sid,
-          reply: {
-            text: "Merci 🙏 Votre demande a bien été transmise. L’équipe vous recontactera rapidement.",
-          },
+          reply: { text: "Merci 🙏 Votre demande a bien été transmise. L’équipe vous recontactera rapidement." },
         });
       }
 
       return res.json({
         session_id: sid,
-        reply: {
-          text: `Parfait 👍 Je récapitule : ${state.service} le ${state.date} à ${state.time}. Souhaitez-vous confirmer ?`,
-        },
+        reply: { text: `Parfait 👍 Je récapitule : ${state.service} le ${state.date} à ${state.time}. Souhaitez-vous confirmer ?` },
       });
     }
 
-    // Sinon, demander ce qui manque
+    // Ask what is missing
     if (!state.service) {
       const list = services.length ? services.map((s) => s.name).join(" | ") : null;
       return res.json({
         session_id: sid,
-        reply: {
-          text: list
-            ? `Quel service souhaitez-vous réserver ? (${list})`
-            : "Quel service souhaitez-vous réserver ?",
-        },
+        reply: { text: list ? `Quel service souhaitez-vous réserver ? (${list})` : "Quel service souhaitez-vous réserver ?" },
       });
     }
 
@@ -312,58 +471,6 @@ app.post("/chat", async (req, res) => {
     return res.json({
       session_id: sid,
       reply: { text: "À quelle heure souhaitez-vous le rendez-vous ? (ex: 14h ou 14:30)" },
-    });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ error: "Erreur serveur", details: String(e) });
-  }
-});
-
-/* ================================
-   ✅ BUSINESS PUBLIC ENDPOINT
-   Used by Odoo public page: /business?slug=atelier-roma
-   Test: https://ai-engine-zcer.onrender.com/business/atelier-roma
-================================= */
-app.get("/business/:slug", (req, res) => {
-  try {
-    const slug = req.params.slug;
-
-    const fallback = FALLBACK_BUSINESSES[slug];
-    if (!fallback) return res.status(404).json({ error: "Business not found" });
-
-    // Public-safe fields only (no emails, no secrets)
-    const name =
-      fallback?.kb?.business?.name ||
-      fallback?.name ||
-      slug;
-
-    const business_type =
-      fallback?.kb?.business?.business_type ||
-      fallback?.business_type ||
-      "local_business";
-
-    // Optional: you can later store these inside kb.business
-    const description =
-      fallback?.kb?.business?.description ||
-      "Bienvenue. Posez vos questions ou demandez un rendez-vous via l’assistant.";
-
-    const address =
-      fallback?.kb?.business?.address ||
-      "";
-
-    const map_url =
-      fallback?.kb?.business?.map_url ||
-      (address
-        ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`
-        : "");
-
-    res.json({
-      slug,
-      name,
-      business_type,
-      description,
-      address,
-      map_url,
     });
   } catch (e) {
     console.error(e);
