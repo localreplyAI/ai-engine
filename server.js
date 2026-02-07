@@ -9,6 +9,11 @@ app.use(cors());
 app.use(express.json());
 
 /* ================================
+   SESSION MEMORY (V1 - in-memory)
+================================= */
+const SESSIONS = {};
+
+/* ================================
    FALLBACK BUSINESS (sécurité)
 ================================= */
 const FALLBACK_BUSINESSES = {
@@ -16,41 +21,64 @@ const FALLBACK_BUSINESSES = {
     name: "Atelier Roma",
     business_type: "hair_salon",
     kb: {
-      business: { name: "Atelier Roma", business_type: "hair_salon", timezone: "Europe/Zurich" },
+      business: {
+        name: "Atelier Roma",
+        business_type: "hair_salon",
+        timezone: "Europe/Zurich"
+      },
       hours_text: "Lun-Ven 09:00-18:00, Sam 09:00-16:00",
       services: [
         { id: "svc_1", name: "Coupe homme", duration_min: 30, price_chf: 35 },
         { id: "svc_2", name: "Barbe", duration_min: 20, price_chf: 25 },
-        { id: "svc_3", name: "Coupe + barbe", duration_min: 50, price_chf: 55 },
+        { id: "svc_3", name: "Coupe + barbe", duration_min: 50, price_chf: 55 }
       ],
       faq: [
         { q: "Acceptez-vous Twint ?", a: "Oui, Twint est accepté." },
-        { q: "Faites-vous sans rendez-vous ?", a: "Non, uniquement sur rendez-vous." },
-      ],
-    },
-  },
+        { q: "Faites-vous sans rendez-vous ?", a: "Non, uniquement sur rendez-vous." }
+      ]
+    }
+  }
 };
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
 
+/* ================================
+   UTILS
+================================= */
 function safeLower(s) {
   return String(s || "").toLowerCase();
 }
 
+function findServiceByName(kb, serviceName) {
+  if (!kb || !Array.isArray(kb.services) || !serviceName) return null;
+  return kb.services.find(
+    s => safeLower(s.name) === safeLower(serviceName)
+  );
+}
+
+function listServicesText(kb) {
+  if (!kb?.services?.length) return "Je n’ai pas encore la liste des services.";
+  return kb.services
+    .map(s => `${s.name} (${s.price_chf} CHF)`)
+    .join(" | ");
+}
+
 /* ================================
-   ANALYSE OPENAI (JSON STRICT)
+   OPENAI ANALYZER (JSON STRICT)
 ================================= */
 async function analyzeMessage({ message, kb }) {
   try {
     const prompt = `
 Tu es un analyseur. Tu dois retourner UNIQUEMENT un JSON valide.
-Aucune phrase, aucun commentaire.
+Aucun texte, aucun commentaire.
 
 Règles :
 - N’invente rien.
-- Si une info n’est pas claire, mets null.
-- La date doit être YYYY-MM-DD si identifiable.
-- L’heure doit être HH:MM (24h) si identifiable.
+- Si une info est absente ou ambiguë → null.
+- Date: YYYY-MM-DD
+- Heure: HH:MM (24h)
 - intent = "booking" | "faq" | "other"
 
 Services disponibles :
@@ -71,28 +99,22 @@ JSON attendu :
 
     const resp = await client.responses.create({
       model: "gpt-5.2",
-      input: prompt,
+      input: prompt
     });
 
     const text = resp.output_text || "{}";
     return JSON.parse(text);
+
   } catch (e) {
     console.error("Analyze error:", e);
-    return { intent: "other", service_name: null, date: null, time: null, party_size: null };
+    return {
+      intent: "other",
+      service_name: null,
+      date: null,
+      time: null,
+      party_size: null
+    };
   }
-}
-
-/* ================================
-   UTILS
-================================= */
-function findServiceByName(kb, serviceName) {
-  if (!kb || !Array.isArray(kb.services) || !serviceName) return null;
-  return kb.services.find(s => safeLower(s.name) === safeLower(serviceName));
-}
-
-function listServicesText(kb) {
-  if (!kb?.services?.length) return "Je n’ai pas encore la liste des services.";
-  return kb.services.map(s => `${s.name} (${s.price_chf} CHF)`).join(" | ");
 }
 
 /* ================================
@@ -105,59 +127,80 @@ app.post("/chat", async (req, res) => {
       return res.status(400).json({ error: "business_slug et message requis." });
     }
 
+    const sid = session_id || "anon";
+
+    // Init session state
+    SESSIONS[sid] = SESSIONS[sid] || {
+      service_name: null,
+      date: null,
+      time: null
+    };
+    const state = SESSIONS[sid];
+
     const fallback = FALLBACK_BUSINESSES[business_slug];
     const effectiveKB = kb || (fallback ? fallback.kb : null);
 
     const businessName =
-      effectiveKB?.business?.name || fallback?.name || "ce business";
+      effectiveKB?.business?.name ||
+      fallback?.name ||
+      "ce business";
 
     /* ===== Analyse OpenAI ===== */
     const analysis = await analyzeMessage({ message, kb: effectiveKB });
-    console.log("ANALYSIS:", analysis); // <-- volontaire (debug pédagogique)
+    console.log("ANALYSIS:", analysis);
 
-    /* ===== BOOKING INTELLIGENT (V1) ===== */
+    // Merge analysis into state (jamais écraser par null)
+    if (analysis.service_name) state.service_name = analysis.service_name;
+    if (analysis.date) state.date = analysis.date;
+    if (analysis.time) state.time = analysis.time;
+
+    /* ===== BOOKING STATE MACHINE (HAIR SALON V1) ===== */
     if (analysis.intent === "booking") {
-      if (!analysis.service_name) {
+
+      if (!state.service_name) {
         return res.json({
-          session_id,
+          session_id: sid,
           reply: { text: "Quel service souhaitez-vous réserver ?" }
         });
       }
 
-      const service = findServiceByName(effectiveKB, analysis.service_name);
+      const service = findServiceByName(effectiveKB, state.service_name);
       if (!service) {
+        state.service_name = null;
         return res.json({
-          session_id,
-          reply: { text: `Je n’ai pas trouvé ce service. Voici ceux disponibles : ${listServicesText(effectiveKB)}` }
+          session_id: sid,
+          reply: {
+            text: `Je n’ai pas trouvé ce service. Voici ceux disponibles : ${listServicesText(effectiveKB)}`
+          }
         });
       }
 
-      if (!analysis.date) {
+      if (!state.date) {
         return res.json({
-          session_id,
+          session_id: sid,
           reply: { text: "Pour quelle date souhaitez-vous le rendez-vous ?" }
         });
       }
 
-      if (!analysis.time) {
+      if (!state.time) {
         return res.json({
-          session_id,
+          session_id: sid,
           reply: { text: "À quelle heure souhaitez-vous le rendez-vous ?" }
         });
       }
 
-      // Tout est compris → confirmation (pas encore de calendrier)
+      // Tout est prêt → confirmation
       return res.json({
-        session_id,
+        session_id: sid,
         reply: {
-          text: `Parfait 👍 Je récapitule : ${service.name} le ${analysis.date} à ${analysis.time}. Souhaitez-vous confirmer ?`
+          text: `Parfait 👍 Je récapitule : ${service.name} le ${state.date} à ${state.time}. Souhaitez-vous confirmer ?`
         }
       });
     }
 
-    /* ===== FALLBACK SAFE (OpenAI déjà filtré avant) ===== */
+    /* ===== FALLBACK ===== */
     return res.json({
-      session_id,
+      session_id: sid,
       reply: { text: `Bienvenue chez ${businessName}. Comment puis-je vous aider ?` }
     });
 
@@ -167,5 +210,10 @@ app.post("/chat", async (req, res) => {
   }
 });
 
+/* ================================
+   START SERVER
+================================= */
 const PORT = process.env.PORT || 8787;
-app.listen(PORT, () => console.log(`AI engine running on http://localhost:${PORT}`));
+app.listen(PORT, () => {
+  console.log(`AI engine running on http://localhost:${PORT}`);
+});
