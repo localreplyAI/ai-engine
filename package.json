@@ -12,6 +12,7 @@
   "type": "commonjs",
   "dependencies": {
     "cors": "^2.8.6",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "openai": "^6.18.0"
   }
 }
