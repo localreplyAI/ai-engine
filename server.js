@@ -73,8 +73,6 @@ async function sendBookingEmail({ to, businessName, booking }) {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) throw new Error("Missing RESEND_API_KEY on server");
 
-  // Pour commencer, Resend fournit un domaine de test : onboarding@resend.dev
-  // Plus tard, tu mettras ton domaine (ex: no-reply@localreply.ai)
   const payload = {
     from: "LocalReply AI <onboarding@resend.dev>",
     to: [to],
@@ -133,7 +131,6 @@ function isConfirmation(text) {
 function parseDateFromText(text) {
   if (!text) return null;
 
-  // Si déjà YYYY-MM-DD
   const iso = text.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
   if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
 
@@ -176,11 +173,9 @@ function parseDateFromText(text) {
 function parseTimeFromText(text) {
   if (!text) return null;
 
-  // "14h", "14h30"
   const h = text.match(/\b(\d{1,2})h(\d{2})?\b/i);
   if (h) return `${String(h[1]).padStart(2, "0")}:${h[2] || "00"}`;
 
-  // "14:30"
   const c = text.match(/\b(\d{1,2}):(\d{2})\b/);
   if (c) return `${String(c[1]).padStart(2, "0")}:${c[2]}`;
 
@@ -218,7 +213,7 @@ app.post("/chat", async (req, res) => {
 
     const services = effectiveKB?.services || fallback?.kb?.services || [];
     const businessEmail =
-      effectiveKB?.business?.contact_email || // si tu veux l’ajouter plus tard dans le KB
+      effectiveKB?.business?.contact_email ||
       fallback?.contact_email ||
       null;
 
@@ -255,7 +250,6 @@ app.post("/chat", async (req, res) => {
       // Si l'utilisateur confirme -> envoi email + reset
       if (isConfirmation(message)) {
         if (!businessEmail) {
-          // Pas d’email configuré => on ne bloque pas, mais on informe
           delete SESSIONS[sid];
           return res.json({
             session_id: sid,
@@ -277,7 +271,7 @@ app.post("/chat", async (req, res) => {
           },
         });
 
-        delete SESSIONS[sid]; // reset session
+        delete SESSIONS[sid];
 
         return res.json({
           session_id: sid,
@@ -318,6 +312,58 @@ app.post("/chat", async (req, res) => {
     return res.json({
       session_id: sid,
       reply: { text: "À quelle heure souhaitez-vous le rendez-vous ? (ex: 14h ou 14:30)" },
+    });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: "Erreur serveur", details: String(e) });
+  }
+});
+
+/* ================================
+   ✅ BUSINESS PUBLIC ENDPOINT
+   Used by Odoo public page: /business?slug=atelier-roma
+   Test: https://ai-engine-zcer.onrender.com/business/atelier-roma
+================================= */
+app.get("/business/:slug", (req, res) => {
+  try {
+    const slug = req.params.slug;
+
+    const fallback = FALLBACK_BUSINESSES[slug];
+    if (!fallback) return res.status(404).json({ error: "Business not found" });
+
+    // Public-safe fields only (no emails, no secrets)
+    const name =
+      fallback?.kb?.business?.name ||
+      fallback?.name ||
+      slug;
+
+    const business_type =
+      fallback?.kb?.business?.business_type ||
+      fallback?.business_type ||
+      "local_business";
+
+    // Optional: you can later store these inside kb.business
+    const description =
+      fallback?.kb?.business?.description ||
+      "Bienvenue. Posez vos questions ou demandez un rendez-vous via l’assistant.";
+
+    const address =
+      fallback?.kb?.business?.address ||
+      "";
+
+    const map_url =
+      fallback?.kb?.business?.map_url ||
+      (address
+        ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`
+        : "");
+
+    res.json({
+      slug,
+      name,
+      business_type,
+      description,
+      address,
+      map_url,
     });
   } catch (e) {
     console.error(e);
