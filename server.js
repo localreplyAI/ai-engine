@@ -579,6 +579,137 @@ app.get("/lr-business.js", (req, res) => {
 });
 
 /* ================================
+   ODOO SCRIPT: /lr-auth.js
+   (Login page: send magic link)
+================================= */
+app.get("/lr-auth.js", (req, res) => {
+  res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+  res.send(`(function(){
+  var API = "${APP_BASE_URL}";
+  function byId(id){ return document.getElementById(id); }
+  var emailEl = byId("lr-email");
+  var slugEl  = byId("lr-slug");
+  var btnEl   = byId("lr-send-link");
+  var msgEl   = byId("lr-msg");
+
+  function setMsg(text, ok){
+    if(!msgEl) return;
+    msgEl.style.display = "block";
+    msgEl.style.borderColor = ok ? "#A7F3D0" : "#FECACA";
+    msgEl.style.background  = ok ? "#ECFDF5" : "#FEF2F2";
+    msgEl.style.color       = ok ? "#065F46" : "#7F1D1D";
+    msgEl.textContent = text;
+  }
+
+  async function sendLink(){
+    var email = (emailEl && emailEl.value || "").trim().toLowerCase();
+    var slug  = (slugEl && slugEl.value || "").trim().toLowerCase();
+
+    if(!email || email.indexOf("@") === -1) return setMsg("❌ Email invalide", false);
+    if(!slug) return setMsg("❌ Slug requis (ex: atelier-roma)", false);
+
+    btnEl.disabled = true;
+    btnEl.style.opacity = "0.7";
+    btnEl.textContent = "⏳ Envoi…";
+
+    try{
+      var r = await fetch(API + "/auth/send-link", {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ email: email, slug: slug })
+      });
+      var data = await r.json().catch(function(){ return {}; });
+
+      if(!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+
+      // Si Resend bloque, le backend renvoie verify_url (fallback)
+      if(data.verify_url){
+        setMsg("⚠️ Email bloqué en test. Ouvre ce lien pour te connecter : " + data.verify_url, true);
+        return;
+      }
+
+      setMsg("✅ Lien envoyé. Vérifie tes emails (valide 15 min).", true);
+    }catch(e){
+      setMsg("❌ " + e.message, false);
+    }finally{
+      btnEl.disabled = false;
+      btnEl.style.opacity = "1";
+      btnEl.textContent = "📩 Envoyer un lien de connexion";
+    }
+  }
+
+  if(btnEl) btnEl.addEventListener("click", sendLink);
+
+  // stop Odoo editor hotkeys
+  [emailEl, slugEl].forEach(function(el){
+    if(!el) return;
+    ["keydown","keyup","keypress","input","click","mousedown"].forEach(function(ev){
+      el.addEventListener(ev, function(e){ e.stopPropagation(); }, true);
+    });
+  });
+})();`);
+});
+
+/* ================================
+   ODOO SCRIPT: /lr-dashboard.js
+   (Dashboard page: check session + load business)
+================================= */
+app.get("/lr-dashboard.js", (req, res) => {
+  res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+  res.send(`(function(){
+  var API = "${APP_BASE_URL}";
+  function byId(id){ return document.getElementById(id); }
+  var box = byId("lr-dash");
+  var msg = byId("lr-dash-msg");
+  var btnLogout = byId("lr-logout");
+
+  function setMsg(t){
+    if(!msg) return;
+    msg.textContent = t;
+  }
+
+  async function load(){
+    try{
+      var r = await fetch(API + "/me", { method:"GET", credentials:"include" });
+      var data = await r.json().catch(function(){ return {}; });
+
+      if(!r.ok) {
+        // not logged in -> show link to /login
+        setMsg("🔒 Non connecté. Va sur /login pour recevoir ton lien.");
+        return;
+      }
+
+      var b = data.business || {};
+      byId("lr-biz-name").textContent = b.name || "—";
+      byId("lr-biz-slug").textContent = b.slug || "—";
+      byId("lr-biz-email").textContent = b.owner_email || "—";
+
+      // lien public
+      var pub = (window.location.origin || "") + "/business?slug=" + encodeURIComponent(b.slug || "");
+      var a = byId("lr-public-link");
+      a.href = pub;
+      a.textContent = pub;
+
+      setMsg("✅ Connecté");
+    }catch(e){
+      setMsg("❌ Erreur: " + e.message);
+    }
+  }
+
+  async function logout(){
+    try{
+      await fetch(API + "/auth/logout", { method:"POST", credentials:"include" });
+    }catch(e){}
+    window.location.href = "/login";
+  }
+
+  if(btnLogout) btnLogout.addEventListener("click", logout);
+
+  load();
+})();`);
+});
+
+/* ================================
    START
 ================================= */
 const PORT = process.env.PORT || 8787;
