@@ -582,6 +582,9 @@ app.get("/lr-business.js", (req, res) => {
    ODOO SCRIPT: /lr-auth.js
    (Login page: send magic link)
 ================================= */
+var st = document.getElementById("lr-auth-status");
+if(st) st.textContent = "État script : ✅ chargé";
+
 app.get("/lr-auth.js", (req, res) => {
   res.setHeader("Content-Type", "application/javascript; charset=utf-8");
   res.send(`(function(){
