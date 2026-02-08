@@ -1,8 +1,9 @@
 /**
- * LocalReply AI Engine — server.js (Step B)
- * - POST /chat                    -> chat + booking flow (your existing logic)
- * - GET  /business/:slug          -> public business data for Odoo /business?slug=...
- * - POST /business/upsert (ADMIN) -> create/update a business (for your "simulate business" page)
+ * LocalReply AI Engine — server.js (Step B - fixed)
+ * - Serves static JS from /public (lr-auth.js, etc.)
+ * - POST /chat                    -> chat + booking flow
+ * - GET  /business/:slug          -> public business data
+ * - POST /business/upsert (ADMIN) -> create/update a business
  *
  * Requires:
  *   npm i express cors openai pg
@@ -25,16 +26,24 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+/**
+ * ✅ IMPORTANT
+ * Sert tout ce qui est dans /public à la racine :
+ * public/lr-auth.js -> https://<render>/lr-auth.js
+ */
+app.use(express.static("public"));
+
 /* ================================
    DB (Postgres)
 ================================= */
 if (!process.env.DATABASE_URL) {
   console.warn("⚠️ Missing DATABASE_URL. The /business endpoints will fail until set.");
 }
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // If your provider requires SSL, uncomment:
-  // ssl: { rejectUnauthorized: false },
+  // ✅ Neon/Supabase/Render: souvent nécessaire
+  ssl: { rejectUnauthorized: false },
 });
 
 async function initDb() {
@@ -55,9 +64,10 @@ async function initDb() {
     );
   `);
 }
-initDb().then(() => console.log("✅ DB ready")).catch((e) => {
-  console.error("❌ DB init error:", e);
-});
+
+initDb()
+  .then(() => console.log("✅ DB ready"))
+  .catch((e) => console.error("❌ DB init error:", e));
 
 /* ================================
    ADMIN AUTH (simple)
@@ -75,7 +85,6 @@ function requireAdmin(req, res, next) {
 
 /* ================================
    SESSION MEMORY (in-memory)
-   (ok for now; later you can move to DB/Redis)
 ================================= */
 const SESSIONS = {};
 
@@ -109,8 +118,7 @@ JSON:
 }
 
 /* ================================
-   EMAIL via RESEND (no SMTP)
-   (optional - can be disabled by not setting RESEND_API_KEY)
+   EMAIL via RESEND (optional)
 ================================= */
 async function sendBookingEmail({ to, businessName, booking }) {
   const apiKey = process.env.RESEND_API_KEY;
@@ -131,7 +139,6 @@ Envoyé via LocalReply AI.
     `.trim(),
   };
 
-  // Node 18+ has fetch. If not, install node-fetch.
   const r = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
@@ -175,7 +182,6 @@ function isConfirmation(text) {
 function parseDateFromText(text) {
   if (!text) return null;
 
-  // already YYYY-MM-DD
   const iso = text.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
   if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
 
@@ -218,11 +224,9 @@ function parseDateFromText(text) {
 function parseTimeFromText(text) {
   if (!text) return null;
 
-  // "14h", "14h30"
   const h = text.match(/\b(\d{1,2})h(\d{2})?\b/i);
   if (h) return `${String(h[1]).padStart(2, "0")}:${h[2] || "00"}`;
 
-  // "14:30"
   const c = text.match(/\b(\d{1,2}):(\d{2})\b/);
   if (c) return `${String(c[1]).padStart(2, "0")}:${c[2]}`;
 
@@ -232,11 +236,6 @@ function parseTimeFromText(text) {
 /* ================================
    BUSINESS ENDPOINTS
 ================================= */
-
-/**
- * Create or update a business (admin-only)
- * Used by your Odoo "/create-business" test form.
- */
 app.post("/business/upsert", requireAdmin, async (req, res) => {
   try {
     const {
@@ -298,10 +297,6 @@ app.post("/business/upsert", requireAdmin, async (req, res) => {
   }
 });
 
-/**
- * Public business data for the public page (/business?slug=...)
- * Returns only non-sensitive fields.
- */
 app.get("/business/:slug", async (req, res) => {
   try {
     const slug = req.params.slug;
@@ -323,7 +318,11 @@ app.get("/business/:slug", async (req, res) => {
       name: row.name,
       description: row.description || "",
       address: row.address || "",
-      map_url: row.map_url || (row.address ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(row.address)}` : ""),
+      map_url:
+        row.map_url ||
+        (row.address
+          ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(row.address)}`
+          : ""),
       business_type: row.business_type || "local_business",
     });
   } catch (e) {
@@ -342,7 +341,6 @@ app.post("/chat", async (req, res) => {
       return res.status(400).json({ error: "business_slug et message requis." });
     }
 
-    // Session
     const sid = session_id || "anon";
     SESSIONS[sid] = SESSIONS[sid] || {
       service: null,
@@ -352,17 +350,14 @@ app.post("/chat", async (req, res) => {
     };
     const state = SESSIONS[sid];
 
-    // Load business from DB
     const r = await pool.query(
       `SELECT name, business_type, contact_email, timezone, services
        FROM businesses
        WHERE slug = $1`,
       [business_slug]
     );
-
     const dbBusiness = r.rowCount ? r.rows[0] : null;
 
-    // Effective KB: if caller provides kb, it overrides; else build from DB
     const effectiveKB =
       kb ||
       (dbBusiness
@@ -371,7 +366,6 @@ app.post("/chat", async (req, res) => {
               name: dbBusiness.name,
               business_type: dbBusiness.business_type || "local_business",
               timezone: dbBusiness.timezone || "Europe/Zurich",
-              // you can add more later (hours/rules/etc.)
             },
             services: Array.isArray(dbBusiness.services) ? dbBusiness.services : [],
           }
@@ -380,18 +374,15 @@ app.post("/chat", async (req, res) => {
     const businessName = effectiveKB?.business?.name || "ce business";
     const services = effectiveKB?.services || [];
 
-    // Email: from DB first, or from kb if you later include it
     const businessEmail =
       effectiveKB?.business?.contact_email ||
       (dbBusiness && dbBusiness.contact_email ? dbBusiness.contact_email : null);
 
-    // Intent
     const intentRes = await analyzeIntent(message);
     if (intentRes.intent === "booking" || state.in_booking) {
       state.in_booking = true;
     }
 
-    // If not in booking, simple reply for now
     if (!state.in_booking) {
       return res.json({
         session_id: sid,
@@ -399,7 +390,6 @@ app.post("/chat", async (req, res) => {
       });
     }
 
-    // Fill fields (code > IA)
     if (!state.service) {
       const svc = services.find((s) => safeLower(message).includes(safeLower(s.name)));
       if (svc) state.service = svc.name;
@@ -413,7 +403,6 @@ app.post("/chat", async (req, res) => {
       if (t) state.time = t;
     }
 
-    // If all set -> confirm
     if (state.service && state.date && state.time) {
       if (isConfirmation(message)) {
         if (!businessEmail) {
@@ -431,11 +420,7 @@ app.post("/chat", async (req, res) => {
         await sendBookingEmail({
           to: businessEmail,
           businessName,
-          booking: {
-            service: state.service,
-            date: state.date,
-            time: state.time,
-          },
+          booking: { service: state.service, date: state.date, time: state.time },
         });
 
         delete SESSIONS[sid];
@@ -452,7 +437,6 @@ app.post("/chat", async (req, res) => {
       });
     }
 
-    // Ask what is missing
     if (!state.service) {
       const list = services.length ? services.map((s) => s.name).join(" | ") : null;
       return res.json({
@@ -476,240 +460,6 @@ app.post("/chat", async (req, res) => {
     console.error(e);
     return res.status(500).json({ error: "Erreur serveur", details: String(e) });
   }
-});
-
-/* ================================
-   STATIC JS for Odoo (script src)
-================================= */
-app.get("/lr-business.js", (req, res) => {
-  res.setHeader("Content-Type", "application/javascript; charset=utf-8");
-  res.send(`(function(){
-  function getSlug(){ return new URLSearchParams(window.location.search).get("slug"); }
-  var slug = getSlug();
-  var API = "https://ai-engine-zcer.onrender.com"; // <= ton URL Render
-
-  function byId(id){ return document.getElementById(id); }
-  var elName = byId("biz-name");
-  var elDesc = byId("biz-desc");
-  var elAddr = byId("biz-address");
-  var elMap = byId("biz-map");
-  var elMapEmbed = byId("biz-map-embed");
-  var elDebug = byId("lr-debug");
-
-  function dbg(t){ if(elDebug) elDebug.textContent = "DEBUG: " + t; }
-
-  if(!slug){
-    if(elName) elName.textContent = "Business introuvable";
-    if(elDesc) elDesc.textContent = "Lien incomplet. Exemple : /business?slug=atelier-roma";
-    dbg("slug manquant");
-    return;
-  }
-
-  dbg("slug = " + slug + " (chargement...)");
-
-  fetch(API + "/business/" + encodeURIComponent(slug))
-    .then(function(r){ return r.json().then(function(data){ 
-      if(!r.ok) throw new Error(data.error || ("HTTP " + r.status));
-      return data;
-    });})
-    .then(function(b){
-      if(elName) elName.textContent = b.name || slug;
-      if(elDesc) elDesc.textContent = b.description || "";
-      if(elAddr) elAddr.textContent = b.address || "—";
-
-      var mapUrl = b.address
-        ? ("https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(b.address))
-        : (b.map_url || "#");
-
-      if(elMap) elMap.href = mapUrl;
-
-      if(elMapEmbed && b.address){
-        elMapEmbed.src = "https://www.google.com/maps?q=" + encodeURIComponent(b.address) + "&output=embed";
-      }
-
-      dbg("OK ✅ données chargées");
-    })
-    .catch(function(e){
-      if(elName) elName.textContent = "Business introuvable";
-      if(elDesc) elDesc.textContent = "Impossible de charger les données.";
-      dbg("Erreur fetch: " + e.message);
-      console.error(e);
-    });
-
-  // Chat (optionnel si tu as déjà ton widget ailleurs)
-  var sessionId = "sess_" + Math.random().toString(16).slice(2);
-  var box = byId("lr-messages");
-  var input = byId("lr-input");
-  var btn = byId("lr-send");
-
-  function addMessage(role, text){
-    if(!box) return;
-    var div = document.createElement("div");
-    div.style.margin = "6px 0";
-    div.innerHTML = "<b>" + role + " :</b> " + text;
-    box.appendChild(div);
-    box.scrollTop = box.scrollHeight;
-  }
-
-  async function sendMessage(){
-    if(!input) return;
-    var message = (input.value || "").trim();
-    if(!message) return;
-
-    addMessage("Vous", message);
-    input.value = "";
-
-    try{
-      var r = await fetch(API + "/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ business_slug: slug, session_id: sessionId, message: message })
-      });
-      var data = await r.json();
-      if(!r.ok) throw new Error(data.error || "Erreur API");
-      addMessage("Assistant", (data.reply && data.reply.text) ? data.reply.text : "…");
-    }catch(e){
-      addMessage("Assistant", "Désolé, problème technique. (" + e.message + ")");
-    }
-  }
-
-  if(btn) btn.addEventListener("click", sendMessage);
-  if(input) input.addEventListener("keydown", function(e){ if(e.key === "Enter") sendMessage(); });
-})();`);
-});
-
-/* ================================
-   ODOO SCRIPT: /lr-auth.js
-   (Login page: send magic link)
-================================= */
-var st = document.getElementById("lr-auth-status");
-if(st) st.textContent = "État script : ✅ chargé";
-
-app.get("/lr-auth.js", (req, res) => {
-  res.setHeader("Content-Type", "application/javascript; charset=utf-8");
-  res.send(`(function(){
-  var API = "${APP_BASE_URL}";
-  function byId(id){ return document.getElementById(id); }
-  var emailEl = byId("lr-email");
-  var slugEl  = byId("lr-slug");
-  var btnEl   = byId("lr-send-link");
-  var msgEl   = byId("lr-msg");
-
-  function setMsg(text, ok){
-    if(!msgEl) return;
-    msgEl.style.display = "block";
-    msgEl.style.borderColor = ok ? "#A7F3D0" : "#FECACA";
-    msgEl.style.background  = ok ? "#ECFDF5" : "#FEF2F2";
-    msgEl.style.color       = ok ? "#065F46" : "#7F1D1D";
-    msgEl.textContent = text;
-  }
-
-  async function sendLink(){
-    var email = (emailEl && emailEl.value || "").trim().toLowerCase();
-    var slug  = (slugEl && slugEl.value || "").trim().toLowerCase();
-
-    if(!email || email.indexOf("@") === -1) return setMsg("❌ Email invalide", false);
-    if(!slug) return setMsg("❌ Slug requis (ex: atelier-roma)", false);
-
-    btnEl.disabled = true;
-    btnEl.style.opacity = "0.7";
-    btnEl.textContent = "⏳ Envoi…";
-
-    try{
-      var r = await fetch(API + "/auth/send-link", {
-        method:"POST",
-        headers:{ "Content-Type":"application/json" },
-        body: JSON.stringify({ email: email, slug: slug })
-      });
-      var data = await r.json().catch(function(){ return {}; });
-
-      if(!r.ok) throw new Error(data.error || ("HTTP " + r.status));
-
-      // Si Resend bloque, le backend renvoie verify_url (fallback)
-      if(data.verify_url){
-        setMsg("⚠️ Email bloqué en test. Ouvre ce lien pour te connecter : " + data.verify_url, true);
-        return;
-      }
-
-      setMsg("✅ Lien envoyé. Vérifie tes emails (valide 15 min).", true);
-    }catch(e){
-      setMsg("❌ " + e.message, false);
-    }finally{
-      btnEl.disabled = false;
-      btnEl.style.opacity = "1";
-      btnEl.textContent = "📩 Envoyer un lien de connexion";
-    }
-  }
-
-  if(btnEl) btnEl.addEventListener("click", sendLink);
-
-  // stop Odoo editor hotkeys
-  [emailEl, slugEl].forEach(function(el){
-    if(!el) return;
-    ["keydown","keyup","keypress","input","click","mousedown"].forEach(function(ev){
-      el.addEventListener(ev, function(e){ e.stopPropagation(); }, true);
-    });
-  });
-})();`);
-});
-
-/* ================================
-   ODOO SCRIPT: /lr-dashboard.js
-   (Dashboard page: check session + load business)
-================================= */
-app.get("/lr-dashboard.js", (req, res) => {
-  res.setHeader("Content-Type", "application/javascript; charset=utf-8");
-  res.send(`(function(){
-  var API = "${APP_BASE_URL}";
-  function byId(id){ return document.getElementById(id); }
-  var box = byId("lr-dash");
-  var msg = byId("lr-dash-msg");
-  var btnLogout = byId("lr-logout");
-
-  function setMsg(t){
-    if(!msg) return;
-    msg.textContent = t;
-  }
-
-  async function load(){
-    try{
-      var r = await fetch(API + "/me", { method:"GET", credentials:"include" });
-      var data = await r.json().catch(function(){ return {}; });
-
-      if(!r.ok) {
-        // not logged in -> show link to /login
-        setMsg("🔒 Non connecté. Va sur /login pour recevoir ton lien.");
-        return;
-      }
-
-      var b = data.business || {};
-      byId("lr-biz-name").textContent = b.name || "—";
-      byId("lr-biz-slug").textContent = b.slug || "—";
-      byId("lr-biz-email").textContent = b.owner_email || "—";
-
-      // lien public
-      var pub = (window.location.origin || "") + "/business?slug=" + encodeURIComponent(b.slug || "");
-      var a = byId("lr-public-link");
-      a.href = pub;
-      a.textContent = pub;
-
-      setMsg("✅ Connecté");
-    }catch(e){
-      setMsg("❌ Erreur: " + e.message);
-    }
-  }
-
-  async function logout(){
-    try{
-      await fetch(API + "/auth/logout", { method:"POST", credentials:"include" });
-    }catch(e){}
-    window.location.href = "/login";
-  }
-
-  if(btnLogout) btnLogout.addEventListener("click", logout);
-
-  load();
-})();`);
 });
 
 /* ================================
