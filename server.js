@@ -13,6 +13,10 @@
  *   DATABASE_URL=... (Neon/Supabase Postgres)
  *   ADMIN_TOKEN=...  (long random)
  *   RESEND_API_KEY=... (optional, only if you want email sending)
+ *
+ * 🔧 PATCH AUTH ENV:
+ *   APP_BASE_URL=https://ai-engine-zcer.onrender.com
+ *   ODOO_BASE_URL=https://TON-DOMAINE-ODOO (ex: https://localreply.ai)
  */
 
 const express = require("express");
@@ -32,6 +36,15 @@ app.use(express.json());
  * public/lr-auth.js -> https://<render>/lr-auth.js
  */
 app.use(express.static("public"));
+
+/* ================================
+   🔧 PATCH AUTH — BASE URLS
+================================= */
+const APP_BASE_URL =
+  (process.env.APP_BASE_URL || "https://ai-engine-zcer.onrender.com").replace(/\/$/, "");
+
+const ODOO_BASE_URL =
+  (process.env.ODOO_BASE_URL || "").replace(/\/$/, "");
 
 /* ================================
    DB (Postgres)
@@ -461,10 +474,17 @@ app.post("/chat", async (req, res) => {
     return res.status(500).json({ error: "Erreur serveur", details: String(e) });
   }
 });
+
 /* ================================
-   AUTH (Magic link - MOCK v1)
-   ⚠️ Version simple pour valider le flow
+   AUTH (Magic link - MOCK v1) — PATCHED
 ================================= */
+
+// (optionnel) Evite la confusion "Cannot GET" si tu ouvres l'URL dans un navigateur
+app.get("/auth/send-link", (req, res) => {
+  return res
+    .status(405)
+    .send("Use POST /auth/send-link with JSON: { email, slug }");
+});
 
 // Envoi du lien magique
 app.post("/auth/send-link", async (req, res) => {
@@ -476,11 +496,16 @@ app.post("/auth/send-link", async (req, res) => {
 
   console.log("🔐 Magic link demandé :", email, slug);
 
-  // TODO plus tard : token + email (Resend)
+  // ✅ IMPORTANT: lien ABSOLU (sinon Odoo ouvre sur son propre domaine => 404)
+  const verify_url =
+    `${APP_BASE_URL}/auth/verify` +
+    `?email=${encodeURIComponent(email)}` +
+    `&slug=${encodeURIComponent(slug)}`;
+
   return res.json({
     ok: true,
-    message: "Magic link envoyé (mock)",
-    verify_url: `/auth/verify?email=${encodeURIComponent(email)}&slug=${encodeURIComponent(slug)}`
+    message: "Magic link généré (mock)",
+    verify_url,
   });
 });
 
@@ -492,12 +517,20 @@ app.get("/auth/verify", async (req, res) => {
     return res.status(400).send("Lien invalide");
   }
 
-  // TODO plus tard : cookie sécurisé + session
+  // ✅ Redirige vers Odoo (dashboard) si tu as configuré ODOO_BASE_URL
+  if (ODOO_BASE_URL) {
+    const to =
+      `${ODOO_BASE_URL}/dashboard?slug=${encodeURIComponent(slug)}` +
+      `&email=${encodeURIComponent(email)}`;
+    return res.redirect(to);
+  }
+
+  // Fallback si ODOO_BASE_URL pas défini
   res.send(`
-    <h2>✅ Connecté</h2>
+    <h2>✅ Connecté (mock)</h2>
     <p>Email : ${email}</p>
     <p>Business : ${slug}</p>
-    <p><a href="/dashboard">Aller au dashboard</a></p>
+    <p>⚠️ Définis ODOO_BASE_URL pour rediriger automatiquement vers ton dashboard Odoo.</p>
   `);
 });
 
@@ -510,6 +543,7 @@ app.get("/me", async (req, res) => {
 app.post("/auth/logout", async (req, res) => {
   return res.json({ ok: true });
 });
+
 /* ================================
    START
 ================================= */
