@@ -461,7 +461,55 @@ app.post("/chat", async (req, res) => {
     return res.status(500).json({ error: "Erreur serveur", details: String(e) });
   }
 });
+/* ================================
+   AUTH (Magic link - MOCK v1)
+   ⚠️ Version simple pour valider le flow
+================================= */
 
+// Envoi du lien magique
+app.post("/auth/send-link", async (req, res) => {
+  const { email, slug } = req.body || {};
+
+  if (!email || !slug) {
+    return res.status(400).json({ error: "email et slug requis" });
+  }
+
+  console.log("🔐 Magic link demandé :", email, slug);
+
+  // TODO plus tard : token + email (Resend)
+  return res.json({
+    ok: true,
+    message: "Magic link envoyé (mock)",
+    verify_url: `/auth/verify?email=${encodeURIComponent(email)}&slug=${encodeURIComponent(slug)}`
+  });
+});
+
+// Vérification du lien magique
+app.get("/auth/verify", async (req, res) => {
+  const { email, slug } = req.query || {};
+
+  if (!email || !slug) {
+    return res.status(400).send("Lien invalide");
+  }
+
+  // TODO plus tard : cookie sécurisé + session
+  res.send(`
+    <h2>✅ Connecté</h2>
+    <p>Email : ${email}</p>
+    <p>Business : ${slug}</p>
+    <p><a href="/dashboard">Aller au dashboard</a></p>
+  `);
+});
+
+// Session courante (mock)
+app.get("/me", async (req, res) => {
+  return res.status(401).json({ error: "Non connecté (mock)" });
+});
+
+// Déconnexion
+app.post("/auth/logout", async (req, res) => {
+  return res.json({ ok: true });
+});
 /* ================================
    START
 ================================= */
